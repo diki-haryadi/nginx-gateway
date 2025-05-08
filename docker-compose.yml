@@ -3,7 +3,8 @@ version: '3.8'
 services:
   backend:
     build:
-      context: ./backend
+      context: .
+      dockerfile: Dockerfile
     container_name: service-manager-backend
     restart: unless-stopped
     volumes:
@@ -21,7 +22,8 @@ services:
 
   nginx:
     build:
-      context: ./nginx
+      context: .
+      dockerfile: Dockerfile.nginx
     container_name: service-manager-nginx
     restart: unless-stopped
     ports:
