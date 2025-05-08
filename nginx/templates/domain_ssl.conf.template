@@ -1,0 +1,43 @@
+# SSL Configuration for {{.Domain}}
+server {
+    listen 80;
+    server_name {{.Domain}};
+    
+    # Redirect HTTP to HTTPS
+    location / {
+        return 301 https://$host$request_uri;
+    }
+    
+    # Handle letsencrypt challenges
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name {{.Domain}};
+    
+    # SSL certificates from Let's Encrypt
+    ssl_certificate /etc/letsencrypt/live/{{.Domain}}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{.Domain}}/privkey.pem;
+    
+    # SSL optimization
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+    
+    # HSTS (optional, uncomment if needed)
+    # add_header Strict-Transport-Security "max-age=63072000" always;
+    
+    location / {
+        proxy_pass {{.ServiceURL}};
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

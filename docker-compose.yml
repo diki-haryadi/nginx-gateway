@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+    container_name: service-manager-backend
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+      - ./nginx/conf.d:/app/nginx/conf.d
+      - ./nginx/templates:/app/nginx/templates
+      - certbot-data:/etc/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TZ=Asia/Jakarta
+    networks:
+      - app-network
+    depends_on:
+      - nginx
+
+  nginx:
+    build:
+      context: ./nginx
+    container_name: service-manager-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./nginx/templates:/etc/nginx/templates
+      - certbot-data:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    environment:
+      - TZ=Asia/Jakarta
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  certbot:
+    image: certbot/certbot
+    container_name: service-manager-certbot
+    restart: unless-stopped
+    volumes:
+      - certbot-data:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    networks:
+      - app-network
+    depends_on:
+      - nginx
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  certbot-data:
+    name: service-manager-certbot-data
