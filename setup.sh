@@ -158,6 +158,14 @@ EOF
     ln -sf "$NGINX_SITES_AVAILABLE/$domain.conf" "$NGINX_SITES_ENABLED/"
     
     log_message "Nginx configuration for $domain created and enabled."
+    
+    # Verify the configuration file was created
+    if [ ! -f "$NGINX_SITES_AVAILABLE/$domain.conf" ]; then
+        log_message "ERROR: Failed to create Nginx configuration file for $domain"
+        return 1
+    fi
+    
+    return 0
 }
 
 # Function to obtain SSL certificates using Certbot
@@ -176,14 +184,57 @@ setup_ssl() {
     
     log_message "Setting up SSL for $domain using Certbot..."
     
-    # Obtain and install the SSL certificate
+    # Make sure the domain is accessible over HTTP first
+    log_message "Checking if domain is accessible before requesting certificate..."
+    
+    # Check if nginx is running
+    if ! systemctl is-active --quiet nginx; then
+        log_message "WARNING: Nginx is not running. Starting Nginx service..."
+        systemctl start nginx
+    fi
+    
+    # Try to obtain and install the SSL certificate
     certbot --nginx -d "$domain" --non-interactive --agree-tos --email "$email" --redirect || {
         log_message "ERROR: Failed to obtain SSL certificate for $domain"
-        return 1
+        log_message "This could be due to DNS not pointing to this server or rate limits with Let's Encrypt."
+        log_message "Attempting to use --dry-run to diagnose the issue..."
+        
+        certbot --nginx -d "$domain" --non-interactive --agree-tos --email "$email" --redirect --dry-run
+        
+        log_message "Would you like to proceed with a self-signed certificate instead? (y/n)"
+        read -p "Enter your choice (y/n): " fallback_choice
+        
+        if [ "$fallback_choice" = "y" ] || [ "$fallback_choice" = "Y" ]; then
+            log_message "Falling back to self-signed certificate..."
+            generate_self_signed_ssl "$domain"
+            return $?
+        else
+            log_message "Certificate setup aborted."
+            return 1
+        fi
     }
     
-    log_message "SSL setup completed for $domain."
-    return 0
+    # Verify that SSL certificate was actually installed
+    if grep -q "ssl_certificate" "$NGINX_SITES_AVAILABLE/$domain.conf"; then
+        log_message "SSL setup completed for $domain with Let's Encrypt."
+        return 0
+    else
+        log_message "WARNING: Let's Encrypt certificate may not have been installed correctly."
+        log_message "Checking certbot certificates..."
+        certbot certificates
+        
+        log_message "Would you like to force a self-signed certificate instead? (y/n)"
+        read -p "Enter your choice (y/n): " fallback_choice
+        
+        if [ "$fallback_choice" = "y" ] || [ "$fallback_choice" = "Y" ]; then
+            log_message "Setting up self-signed certificate as fallback..."
+            generate_self_signed_ssl "$domain"
+            return $?
+        else
+            log_message "Please check the Nginx configuration and certbot logs."
+            return 1
+        fi
+    fi
 }
 
 # Function to generate a self-signed certificate
@@ -199,19 +250,92 @@ generate_self_signed_ssl() {
     openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
         -keyout "/etc/nginx/ssl/$domain/privkey.pem" \
         -out "/etc/nginx/ssl/$domain/fullchain.pem" \
-        -subj "/CN=$domain" || {
+        -subj "/CN=$domain" -addext "subjectAltName=DNS:$domain" || {
         log_message "ERROR: Failed to generate self-signed certificate for $domain"
         return 1
     }
     
-    # Update Nginx configuration to use the self-signed certificate
-    sed -i "/server_name $domain;/a \\\n    ssl_certificate /etc/nginx/ssl/$domain/fullchain.pem;\n    ssl_certificate_key /etc/nginx/ssl/$domain/privkey.pem;\n    ssl on;" "$NGINX_SITES_AVAILABLE/$domain.conf"
+    # Set proper permissions
+    chmod 644 "/etc/nginx/ssl/$domain/fullchain.pem"
+    chmod 600 "/etc/nginx/ssl/$domain/privkey.pem"
     
-    # Update configuration to listen on port 443
-    sed -i "s/listen 80;/listen 80;\n    listen 443 ssl;/" "$NGINX_SITES_AVAILABLE/$domain.conf"
+    # Create a completely new SSL-enabled configuration
+    cat > "$NGINX_SITES_AVAILABLE/$domain.conf" <<EOF
+server {
+    listen 80;
+    server_name $domain;
+    
+    # Redirect all HTTP requests to HTTPS
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name $domain;
+    
+    access_log /var/log/nginx/${domain}_access.log;
+    error_log /var/log/nginx/${domain}_error.log;
+    
+    # SSL Configuration
+    ssl_certificate /etc/nginx/ssl/$domain/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/$domain/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers on;
+    ssl_ciphers 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256';
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_tickets off;
+    
+    # OCSP Stapling
+    ssl_stapling on;
+    ssl_stapling_verify on;
+    resolver 8.8.8.8 8.8.4.4 valid=300s;
+    resolver_timeout 5s;
+    
+    # Security headers
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    add_header X-Frame-Options SAMEORIGIN;
+    add_header X-Content-Type-Options nosniff;
+    add_header X-XSS-Protection "1; mode=block";
+    
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        # WebSocket support (if needed)
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+}
+EOF
     
     log_message "Self-signed SSL certificate generated and configured for $domain."
-    return 0
+    
+    # Verify the configuration was created properly
+    if [ -f "$NGINX_SITES_AVAILABLE/$domain.conf" ]; then
+        log_message "Verifying SSL configuration exists in the Nginx config file..."
+        if grep -q "ssl_certificate" "$NGINX_SITES_AVAILABLE/$domain.conf"; then
+            log_message "SSL configuration verified successfully."
+            return 0
+        else
+            log_message "ERROR: SSL configuration not found in the Nginx config file."
+            return 1
+        fi
+    else
+        log_message "ERROR: Nginx configuration file not found."
+        return 1
+    fi
 }
 
 # Function to test if a service is reachable
@@ -254,8 +378,22 @@ add_domain() {
     # Test if the target service is reachable
     test_service "$target_ip" "$target_port"
     
-    # Create Nginx configuration
-    create_nginx_config "$domain" "$target_ip" "$target_port"
+    # If using self-signed SSL, generate it directly with full config
+    if [ "$ssl_type" != "letsencrypt" ]; then
+        log_message "Using self-signed SSL, generating certificate and creating combined configuration..."
+        generate_self_signed_ssl "$domain"
+        
+        # Update the target IP and port in the config
+        sed -i "s|proxy_pass http://127.0.0.1:8080;|proxy_pass http://$target_ip:$target_port;|" "$NGINX_SITES_AVAILABLE/$domain.conf"
+    else
+        # For LetsEncrypt, first create the HTTP config, then obtain the certificate
+        create_nginx_config "$domain" "$target_ip" "$target_port"
+    fi
+    
+    # Enable the site if not already enabled
+    if [ ! -L "$NGINX_SITES_ENABLED/$domain.conf" ]; then
+        ln -sf "$NGINX_SITES_AVAILABLE/$domain.conf" "$NGINX_SITES_ENABLED/"
+    fi
     
     # Test Nginx configuration
     nginx -t
@@ -267,18 +405,33 @@ add_domain() {
             return 1
         }
         
-        # Setup SSL based on type
+        # Setup LetsEncrypt SSL if that was chosen
         if [ "$ssl_type" = "letsencrypt" ]; then
             setup_ssl "$domain" "$email"
-        else
-            generate_self_signed_ssl "$domain"
         fi
         
-        # Reload Nginx again after SSL setup
-        nginx -t && systemctl reload nginx
-        
-        log_message "Domain $domain has been successfully added."
-        return 0
+        # Final test and reload
+        if nginx -t; then
+            systemctl reload nginx
+            log_message "Domain $domain has been successfully added with $ssl_type SSL."
+            
+            # Display the path to the configuration file for verification
+            log_message "Configuration saved to: $NGINX_SITES_AVAILABLE/$domain.conf"
+            
+            # Verify SSL files exist
+            if [ "$ssl_type" != "letsencrypt" ]; then
+                if [ -f "/etc/nginx/ssl/$domain/fullchain.pem" ] && [ -f "/etc/nginx/ssl/$domain/privkey.pem" ]; then
+                    log_message "SSL certificates created successfully at /etc/nginx/ssl/$domain/"
+                else
+                    log_message "WARNING: SSL certificate files not found at expected location"
+                fi
+            fi
+            
+            return 0
+        else
+            log_message "ERROR: Final Nginx configuration test failed. Please check the error messages above."
+            return 1
+        fi
     else
         log_message "ERROR: Nginx configuration test failed. Domain $domain was not added."
         return 1
