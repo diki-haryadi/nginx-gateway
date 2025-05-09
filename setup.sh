@@ -642,7 +642,7 @@ initial_setup() {
     if [ "$ssl_type" != "letsencrypt" ] && [ "$ssl_type" != "self-signed" ] && [ "$ssl_type" != "cloudflare" ]; then
         log_message "Invalid SSL type. Defaulting to self-signed."
         ssl_type="self-signed"
-    }
+    fi
     
     # Get the number of domains to add
     get_interactive_input "Enter the number of domains to configure" num_domains
@@ -690,7 +690,7 @@ setup_from_config() {
     if [ -z "$ssl_type" ] || ([ "$ssl_type" != "letsencrypt" ] && [ "$ssl_type" != "self-signed" ] && [ "$ssl_type" != "cloudflare" ]); then
         log_message "Invalid or missing SSL type. Defaulting to self-signed."
         ssl_type="self-signed"
-    }
+    fi
     
     while IFS=, read -r domain target_ip target_port; do
         if [ -n "$domain" ] && [ -n "$target_ip" ] && [ -n "$target_port" ]; then
