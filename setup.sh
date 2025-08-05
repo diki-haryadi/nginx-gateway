@@ -842,7 +842,7 @@ show_help() {
     echo
     echo "Examples:"
     echo "  $0 --initial-setup"
-    echo "  $0 --add-domain example.com 192.168.1.100 8080 admin@example.com letsencrypt"
+    echo "  $0 --add-domain cf.haryadi.my.id 127.0.0.1 8080 unpam.dik@gmail.com cloudflare" -> global token : 9b8cab4c6709588492ad11d5cad5ac0956c2f
     echo "  $0 --from-config domains.conf"
     echo "  $0 --check-ssl example.com"
     echo
